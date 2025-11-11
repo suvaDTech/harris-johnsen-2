@@ -1,0 +1,162 @@
+pipeline {
+    agent any
+
+    environment {
+        SONAR_HOME = tool "Sonar"                    // SonarQube installation name in Jenkins
+        SCANNER = "${SONAR_HOME}/bin/sonar-scanner"  // Sonar scanner path
+        DOCKER_IMAGE = "suvadtech/protfolio-website-img"    // Docker image name
+        DOCKER_TAG = "latest"
+    }
+
+    stages {
+
+        stage("Workspace Cleanup") {
+            steps {
+                script {
+                    echo "🧹 Cleaning workspace..."
+                    cleanWs()
+                }
+            }
+        }
+
+        stage("Git: Code Checkout") {
+            steps {
+                script {
+                    echo "📥 Cloning source code..."
+                    git url: "https://github.com/suvaDTech/harris-johnsen-2.git", branch: "main"
+                    echo "✅ Code clone completed."
+                }
+            }
+        }
+
+        stage("Trivy: Filesystem Scan") {
+            steps {
+                script {
+                    echo "🔍 Running Trivy scan on workspace..."
+                    sh '''
+                    trivy fs . > trivy_fs_report.txt || true
+                    echo "✅ Trivy filesystem scan completed."
+                    '''
+                }
+            }
+        }
+
+        stage("OWASP: Dependency Check") {
+            steps {
+                script {
+                    echo "🔐 Running OWASP Dependency Check..."
+                   sh '''
+                        dependency-check.sh --project "protfolio-website" \
+                            --scan . \
+                            --format "HTML" \
+                            --out dependency-check-report.html || true
+                        '''
+                        echo "✅ OWASP dependency scan completed."
+
+                }
+            }
+        }
+
+        stage("SonarQube: Code Analysis") {
+            steps {
+                script {
+                    echo "🚀 Starting SonarQube analysis..."
+                     withSonarQubeEnv("Sonar"){
+                     sh "$SONAR_HOME/bin/sonar-scanner -Dsonar.projectName=protfolio-website -Dsonar.projectKey=protfolio-website"
+        
+               }
+                    echo "✅ SonarQube analysis completed."
+                }
+            }
+        }
+
+        stage("SonarQube: Quality Gate") {
+            steps {
+                script {
+                    echo "⏳ Waiting for SonarQube quality gate result..."
+                    timeout(time: 2, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                    echo "✅ Quality gate passed."
+                }
+            }
+        }
+
+        stage("Docker: Build Image") {
+            steps {
+                script {
+                    echo "🐳 Building Docker image..."
+                    sh """
+                    docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
+                    docker images
+                    """
+                    echo "✅ Docker image build completed."
+                }
+            }
+        }
+
+        stage("Trivy: Image Scan") {
+            steps {
+                script {
+                    echo "🔎 Running Trivy image scan..."
+                    sh """
+                    trivy image ${DOCKER_IMAGE}:${DOCKER_TAG} > trivy_image_report.txt || true
+                    echo "✅ Trivy image scan completed."
+                    """
+                }
+            }
+        }
+
+        stage("Docker: Push to DockerHub") {
+            steps {
+                script {
+                    echo "📤 Pushing image to DockerHub..."
+                    // withCredentials([usernamePassword(credentialsId: 'dockerHubCred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                        
+                    //     sh "docker login -u ${DOCKER_USER} -p ${DOCKER_PASS}"
+                    //     sh "docker push ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                    //     sh "docker logout"
+                        
+                        
+                    
+                    // }
+                    
+                    withCredentials([usernamePassword(credentialsId: 'dockerHubCred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                        docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        docker logout
+                    '''
+}
+
+                     echo "✅ Image pushed to DockerHub successfully."
+                }
+            }
+        }
+        
+        
+         stage("Docker: Deploy") {
+            steps {
+                script {
+                    echo "📤 Deply start.."
+                    sh "docker compose down && docker compose up -d"
+                    echo "Deplyment Done!!"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "🎉 DevSecOps pipeline completed successfully!"
+            echo "🖥️ Visit your SonarQube dashboard and check vulnerability & quality reports."
+        }
+        failure {
+            echo "❌ DevSecOps pipeline failed. Please check logs and reports."
+        }
+        always {
+            archiveArtifacts artifacts: '*.txt,*.html', fingerprint: true
+            echo "📦 Reports archived."
+        }
+    }
+}
